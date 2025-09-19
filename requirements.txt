@@ -1,0 +1,7 @@
+opencv-python==4.11.0.86
+numpy==1.26.4
+tensorflow==2.19.0
+onnxruntime==1.18.1
+
+# Non-Python dependency for audio. Disable audio in config if you dont care about audio.
+# ffmpeg (Install separately: https://ffmpeg.org/download.html)
