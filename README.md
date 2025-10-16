@@ -1,109 +1,205 @@
-# A state-of-the-art lightweight Face Blurring Pipeline in Python
+# Now You See Me, Now You Don’t: Consent-Driven Privacy for Smart Glasses
 
-This project provides tools for applying face blurring to videos and evaluating the results.
+This repository provides the complete source code for the three-tier architecture of SITARA and the dataset described in the paper.
+
+---
 
 ## Setup
 
 1. **Clone the repository** (if you haven't already):
 
-   ```bash
-   git clone <repository-url>
-   cd Face-Blurring
-   ```
+    ```bash
+    git clone <repository-url>
+    cd SmartGlassesPrivacy
+    ```
 
 2. **Install dependencies** using the provided `requirements.txt` file:
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-3. **Install ffmpeg** using the link provided in the `requirements.txt` file:
+3. **Set up input and output folders and store input video in the input folder**:
 
-## Running the Main Blurring Script
+    ```bash
+    mkdir input
+    mkdir output
+    ```
 
-The main script for blurring videos is `main.py`.
+---
 
-### Usage
-
-```bash
-python main.py
-```
-
-### Changing Input and Output Video Paths
+## Changing Input and Output Video Paths
 
 To specify which video to blur and where to save the output, edit the `Config` class in `main.py`. Locate the following lines:
 
 ```python
 class Config:
-    input_video_path = "path/to/input/video.mp4"
-    output_video_path = "path/to/output/video.mp4"
+    input_video_path = "./input/video.mp4"
+    output_video_path = "./output/video.mp4"
     # ...other config options...
 ```
 
 - Set `input_video_path` to the path of your input video file.
 - Set `output_video_path` to the desired path for the blurred output video.
 
-Save your changes and re-run `main.py`.
+Set other hyperparameters like `OVERLAY_DETECTOR_BOX`, `DISPLAY_VIDEO`, and `SAVE_OUTPUT` as needed.  
+Save your changes and run `main.py`.  
+You may also use `encrypt.py` in the encryption folder.
 
-## Evaluation
+---
 
-To evaluate the blurring results, use the `run_batch_benchmark.py` script:
+## Usage
 
 ```bash
-python run_batch_benchmark.py
+python main.py
 ```
 
-This script will process the output videos and provide evaluation metrics.
+This will generate the relevant encrypted metadata, face embedding, and landmark files along with the blurred video in the output directory.
+
+---
+
+### Both these files are an abstraction to allow for easy prototyping and demo. For actual testing, the performance_eval_rpi.py file in the encryption folder was used. The only differences are the use of picamera interface instead of the openCV interface (to support the camera module) and the use of the actual three queue model described in the paper instead of a demo sequential approach in main.py.
+
+
+## Restoration
+
+To demo the restoration mechanism, navigate to the decryption folder:
+
+```bash
+cd decryption
+```
+
+Then execute the `ttp_code_cosine.py` file. This file requires that you specify a `DB_PATH` consisting of face images in the output folder, simulating the TTP Database of faces.
+
+```bash
+python ttp_code_cosine.py
+```
+
+This file will decrypt the relevant keys and then decrypt the embeddings generated initially. It will then match the embeddings with the faces in the database and generate a `final_matching_results.json` file that stores (in reality it would send to the wearer securely) the unencrypted keys in the output folder.
+
+Then execute the `restore.py` file to generate the restored video:
+
+```bash
+python restore.py
+```
+
+The restored video will be generated in the output folder.
+
+You can also execute the utility file `decrypt_face_blobs_per_id.py`, which will use the encrypted metadata and the TTP private key to decrypt and store the face regions as JPEGs for reference.
+
+---
 
 ## Synthetic Replacement
 
-Warp a video with a synthetic face using `warping.py`, then optionally run **MobileFaceSwap** on the warped result all from one CLI.
+Warp a video with a synthetic face using `warping.py`, then optionally run **MobileFaceSwap** on the warped result, all from one CLI.
 
 ### Prerequisites
-- Python 3.10–3.12 in one environment.
-- Install base deps: `pip install opencv-python numpy`.
+
+- Navigate to the Synthetic Replacement folder.
 - Place **MobileFaceSwap** next to `main.py`:
-  - `MobileFaceSwap/video_test.py`
-  - `MobileFaceSwap/checkpoints/arcface.pdparams` (and any other weights that repo requires)
+    - `MobileFaceSwap/video_test.py`
+    - `MobileFaceSwap/checkpoints/arcface.pdparams` (and any other weights that repo requires)
 - Place assets next to `main.py`:
-  - `synthetic_faces/` (face images, e.g., `female1.jpg`)
-  - `synthetic_landmarks/` (matching `.txt` files with the same stem, e.g., `female1.txt`)
-  - `video_colors.json` mapping video basename → RGB  
-    Example:
-    ```json
-    { "blurred": "(29,25,24)" }
-    ```
+    - `synthetic_faces/` (face images, e.g., `female1.jpg`)
+    - `synthetic_landmarks/` (matching `.txt` files with the same stem, e.g., `female1.txt`)
+    - `video_colors.json` mapping video basename → RGB  
+      Example:
+      ```json
+      { "blurred": "(29,25,24)" }
+      ```
 
-### Expected landmarks layout (for the input video)
-````
+### Expected Landmarks Layout (for the input video)
 
-\<landmarks\_root>/
-\<video\_basename>/
-face\_0/
-frame\_0000.txt
-frame\_0001.txt
-face\_1/
-...
+```
+<landmarks_root>/
+  <video_basename>/
+    face_0/
+      frame_0000.txt
+      frame_0001.txt
+    face_1/
+    ...
+```
 
-````
+### Run (Single Video)
 
-### Run (single video)
 ```bash
 python main.py \
   --video "/absolute/path/to/your_video.mp4" \
   --landmarks_root "/absolute/path/to/video_landmarks" \
   --after_swap
-````
+```
 
 > You do **not** need to pass `--synth_img_folder`, `--synth_lm_folder`, `--output_root`, or `--mfs_script`; the script uses local folders next to `main.py`.
 
 ### Outputs
 
-* `<repo_dir>/<video_name>.mp4` — warped video
-* `<repo_dir>/best_match/` — chosen synthetic (image + landmarks + manifest)
-* MobileFaceSwap’s swapped result will also be written under `<repo_dir>` (naming per that script).
-
+- `<repo_dir>/<video_name>.mp4` — warped video
+- `<repo_dir>/best_match/` — chosen synthetic (image + landmarks + manifest)
+- MobileFaceSwap’s swapped result will also be written under `<repo_dir>` (naming per that script).
 
 ---
 
 For further customization or troubleshooting, refer to comments within each script.
+
+---
+
+## Dataset Contents
+
+[Dataset Link](https://drive.google.com/drive/folders/1ApYf8pxH0Om5gLb2uIyenvLACjYiDzZN?usp=sharing)
+
+- **video_frames_mapping.csv**  
+  Mapping of each video name to the extracted frame numbers.
+
+- **Annotated XMLs/**  
+  Manually annotated XML files.  
+  Naming convention: `{VideoName}_Frame{FrameNumber}_output.xml`
+
+- **Annotated JSONs/**  
+  Manually annotated JSON files.  
+  Naming convention: `{VideoName}_Frame{FrameNumber}_output.json`
+
+- **Movement of Faces/**  
+  Videos categorized by face movement.
+
+- **Num of Faces/**  
+  Videos categorized by number of faces.
+
+- **Size of Faces/**  
+  Videos categorized by face size across datasets and videos.
+
+
+## Evaluation
+### All latency and energy evaluations were done manually for live videos recorded by a plugged pi camera module using the performance_eval_rpi.py file in the encryption folder. It also requires mounting a USB drive in the /mnt/usb folder as described in the paper.
+
+### 📊 Accuracy Evaluation
+
+#### **SITARA_eval.ipynb — Full Accuracy Evaluation Pipeline**
+
+The `SITARA_eval.ipynb` notebook provides a **complete accuracy evaluation framework** for SITARA, enabling in-depth analysis of detection, embedding, and restoration performance. It is designed to reproduce and extend the accuracy results reported in the paper with fully configurable evaluation parameters.
+
+---
+
+### 🧪 Features of `SITARA_eval.ipynb`
+
+| Feature | Description |
+|--------|-------------|
+| 🔄 **COCO-style Metrics** | Computes standard COCO detection metrics (AP/AR) across multiple IoU thresholds. |
+| 📈 **Confidence Threshold Tuning** | Allows you to adjust detection confidence thresholds dynamically to study precision-recall trade-offs. |
+| ⏩ **Frame Skip Evaluation** | Evaluates performance under different frame skip values to analyze latency-accuracy trade-offs. |
+| 📊 **Per-Video & Aggregate Results** | Generates metrics for each individual video and summarizes results across the dataset. |
+| 📁 **GT vs Prediction Comparison** | Compares your model’s outputs with ground truth annotations to quantify detection and localization accuracy. |
+| 🔍 **Visual Debugging** | Provides visualization cells to inspect false positives, false negatives, and mislocalized detections by saving frames. |
+| 📁 **COCO Format Integration** | Supports reading ground truth and prediction data in COCO-compatible JSON format (as generated by your pipeline). |
+
+---
+
+### 🛠️ How to Use
+
+1. **Prepare Ground Truth & Prediction Data**  
+   - Ensure ground truth annotation JSONs are available under the `Annotated JSONs/` directory.  
+   - Make sure prediction JSON files (from the blurring pipeline) are stored in `output/frame_json/`.
+
+2. **Open the Notebook**
+
+   ```bash
+   jupyter notebook SITARA_eval.ipynb
