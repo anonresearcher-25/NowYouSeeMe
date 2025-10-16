@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Face Restoration Script
 Decrypts face metadata and restores faces in blurred video using provided face IDs and AES keys.
@@ -8,6 +7,8 @@ import cv2
 import json
 import base64
 import numpy as np
+import msgpack
+import zlib
 from collections import defaultdict
 from Crypto.Cipher import AES
 
@@ -15,7 +16,7 @@ from Crypto.Cipher import AES
 class RestoreConfig:
     BLURRED_VIDEO_PATH = "../output/blurred.mp4"
     OUTPUT_VIDEO_PATH = "../output/restored.mp4"
-    ENCRYPTED_METADATA_PATH = "../output/video_metadata_encrypted.json"
+    ENCRYPTED_METADATA_PATH = "../output/video_metadata_encrypted.msgpack"
     FACE_KEYS_JSON_PATH = "../output/final_matching_results.json"  # Path to the JSON with face_ids and keys
     DISPLAY_VIDEO = False
     SAVE_OUTPUT = True
@@ -25,14 +26,13 @@ def unpad(data):
     pad_len = data[-1]
     return data[:-pad_len]
 
-def decrypt_data_aes128(encrypted_b64, key):
-    """Decrypt AES128 encrypted data"""
+def decrypt_data_aes128(encrypted_data, key):
+    """Decrypt AES128 encrypted data (accepts bytes directly)"""
     try:
-        encrypted_data = base64.b64decode(encrypted_b64)
         cipher = AES.new(key, AES.MODE_ECB)
         decrypted_padded = cipher.decrypt(encrypted_data)
         decrypted = unpad(decrypted_padded)
-        return decrypted.decode('utf-8')
+        return decrypted
     except Exception as e:
         print(f"Decryption failed: {e}")
         return None
@@ -59,10 +59,17 @@ def load_face_keys(json_path):
         return {}
 
 def load_encrypted_metadata(metadata_path):
-    """Load encrypted face metadata"""
+    """Load compressed and encrypted face metadata from msgpack file"""
     try:
-        with open(metadata_path, 'r') as f:
-            encrypted_metadata = json.load(f)
+        with open(metadata_path, 'rb') as f:
+            compressed_data = f.read()
+        
+        # Decompress
+        decompressed_data = zlib.decompress(compressed_data)
+        
+        # Unpack msgpack
+        encrypted_metadata = msgpack.unpackb(decompressed_data, raw=False)
+        
         print(f"Loaded encrypted metadata for {len(encrypted_metadata)} face tracks")
         return encrypted_metadata
     except Exception as e:
@@ -73,7 +80,7 @@ def decrypt_face_metadata(encrypted_metadata, face_id_to_key):
     """Decrypt all face metadata using provided keys"""
     decrypted_metadata = {}
     
-    for frame_key, encrypted_entries in encrypted_metadata.items():
+    for frame_key, encrypted_blob in encrypted_metadata.items():
         # Extract face_id from frame key (format: "frame_<face_id>")
         if not frame_key.startswith("frame_"):
             continue
@@ -85,22 +92,20 @@ def decrypt_face_metadata(encrypted_metadata, face_id_to_key):
             continue
             
         aes_key = face_id_to_key[face_id]
-        decrypted_entries = []
         
-        for encrypted_entry in encrypted_entries:
-            decrypted_json = decrypt_data_aes128(encrypted_entry, aes_key)
-            if decrypted_json:
-                try:
-                    decrypted_data = json.loads(decrypted_json)
-                    decrypted_entries.append(decrypted_data)
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing decrypted JSON for face_id {face_id}: {e}")
-            else:
-                print(f"Failed to decrypt entry for face_id {face_id}")
+        # Decrypt the blob
+        decrypted_data = decrypt_data_aes128(encrypted_blob, aes_key)
+        if decrypted_data is None:
+            print(f"Failed to decrypt data for face_id {face_id}")
+            continue
         
-        if decrypted_entries:
-            decrypted_metadata[face_id] = decrypted_entries
-            print(f"Successfully decrypted {len(decrypted_entries)} entries for face_id {face_id}")
+        # Unpack the msgpack data
+        try:
+            entries = msgpack.unpackb(decrypted_data, raw=False)
+            decrypted_metadata[face_id] = entries
+            print(f"Successfully decrypted {len(entries)} entries for face_id {face_id}")
+        except Exception as e:
+            print(f"Error unpacking msgpack data for face_id {face_id}: {e}")
     
     return decrypted_metadata
 
@@ -232,10 +237,11 @@ def main():
     if config.SAVE_OUTPUT:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(config.OUTPUT_VIDEO_PATH, fourcc, fps, (width, height))
-    
-    if (out is None or not out.isOpened()):
-        print(f"Error: Could not open output video {config.OUTPUT_VIDEO_PATH}")
-
+        
+        if out is None or not out.isOpened():
+            print(f"Error: Could not open output video {config.OUTPUT_VIDEO_PATH}")
+            cap.release()
+            return
     
     frame_count = 0
     restored_faces_count = 0

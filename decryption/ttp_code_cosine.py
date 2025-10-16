@@ -15,6 +15,8 @@ from tabulate import tabulate
 from types import SimpleNamespace
 import matplotlib.pyplot as plt
 import seaborn as sns
+import zlib
+import msgpack
 
 # --- Path setup ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,7 +25,7 @@ from src.backbones import get_model  # Make sure this is valid
 # from edgeface.face_alignment import align
 
 # --- Constants ---
-KEYS_PATH = "../output/face_keys.json"
+KEYS_PATH = "../output/face_keys.msgpack"
 PRIVATE_KEY_PATH = "private_key.pem"
 DB_PATH = os.path.abspath("../input/ttp_DB")
 SIMILARITY_THRESHOLD = 0.5
@@ -62,10 +64,9 @@ def draw_landmarks(image, landmarks, color=(0, 255, 0), radius=1, thickness=1):
     return img_with_landmarks
 
 # --- AES Decryption Helper ---
-def decrypt_aes_base64(encrypted_b64, key):
+def decrypt_aes_bytes(ciphertext_bytes, key):
     cipher = AES.new(key, AES.MODE_ECB)
-    ciphertext = base64.b64decode(encrypted_b64)
-    plaintext_padded = cipher.decrypt(ciphertext)
+    plaintext_padded = cipher.decrypt(ciphertext_bytes)
     try:
         return unpad(plaintext_padded, 16)
     except ValueError:
@@ -80,8 +81,9 @@ def cosine_similarity(vec1, vec2):
 
 
 # --- Decrypt embeddings ---
-with open(KEYS_PATH, "r") as f:
-    encrypted_keys = json.load(f)
+with open(KEYS_PATH, "rb") as f:
+    encrypted_keys = msgpack.unpackb(zlib.decompress(f.read()), raw=False)
+
 
 face_id_to_aes_key = {}
 for face_id, data in encrypted_keys.items():
@@ -89,7 +91,7 @@ for face_id, data in encrypted_keys.items():
         continue
     encrypted_key_bytes = base64.b64decode(data["aes_key"])
     aes_key = rsa_cipher.decrypt(encrypted_key_bytes)
-    decrypted_embedding_bytes = decrypt_aes_base64(data["embedding"], aes_key)
+    decrypted_embedding_bytes = decrypt_aes_bytes(data["embedding"], aes_key)
     decrypted_str = decrypted_embedding_bytes.decode('utf-8')
 
     face_id_to_aes_key[face_id] = {

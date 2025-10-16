@@ -2,6 +2,8 @@ import socket
 import ssl
 import json
 from pathlib import Path
+import zlib
+import msgpack
 
 PORT = 4443
 HOST = '0.0.0.0'
@@ -9,9 +11,9 @@ FILES_DIR = "../output"  # Directory containing the files to send
 FILE_TO_SEND = Path(FILES_DIR) / "final_matching_results.json"
 
 # open face_keys.json
-FACE_KEYS_FILE = Path(FILES_DIR) / "face_keys.json"
-with open(FACE_KEYS_FILE, 'r') as f:
-    face_keys = json.load(f)
+KEYS_PATH = Path(FILES_DIR) / "face_keys.json"
+with open(KEYS_PATH, "rb") as f:
+    face_keys = msgpack.unpackb(zlib.decompress(f.read()), raw=False)
     AUTH_KEY = face_keys.get("video_identifier")
 
 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
