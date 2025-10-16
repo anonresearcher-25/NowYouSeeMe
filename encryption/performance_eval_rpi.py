@@ -20,10 +20,15 @@ import torch
 from src.backbones import get_model
 from picamera2 import Picamera2
 from libcamera import controls # Import controls for camera settings
-
+import msgpack, zlib, json
 
 read_queue = queue.Queue()
 write_queue = queue.Queue()
+
+skip_value = 7
+protocol_enabled = False
+run_name = "baseline"
+frame_count = 3000
 
 def read_thread(config, picam2):
     global total_frame_read_times
@@ -74,6 +79,7 @@ def process_thread(config, detector, interpretor, input_details, output_details,
     prev_frame = None
 
     face_metadata = {}  # sidecar dict to collect encrypted metadata
+    landmarks_data = {}
     face_tracks = {}  # face_id: {"box": (x1,y1,x2,y2), "aes_key": key}
     MAX_CENTER_DIST = 60 # Vary this
 
@@ -228,16 +234,20 @@ def process_thread(config, detector, interpretor, input_details, output_details,
 
                     face_image_for_encryption = rgb_frame[y:y+h, x:x+w]
 
-                    _, buffer = cv2.imencode('.png', face_image_for_encryption)
+                    _, buffer = cv2.imencode('.jpg', face_image_for_encryption)
                     face_image_encoded = base64.b64encode(buffer).decode('utf-8')
                     data = {
                         "frame": frame_count,
-                        "landmarks": np.array(landmarks_adjusted).tolist(),
+                        # "landmarks": np.array(landmarks_adjusted).tolist(),
                         "face_image": face_image_encoded,
                         "box": [x, y, x+w, y+h],
                         "box_score": float(detected_face_scores[i]),
                         "land_score": float(score),
                         "face_id": face_id
+                    }
+                    data_land = {
+                        "frame": frame_count,
+                        "landmarks": np.array(landmarks_adjusted).tolist(),
                     }
                     # json_data = json.dumps(data).encode('utf-8')
                     # encrypted = encrypt_data_aes128(json_data, aes_key)
@@ -246,7 +256,12 @@ def process_thread(config, detector, interpretor, input_details, output_details,
                     if face_id not in face_metadata:
                         face_metadata[face_id] = []
 
+                    if face_id not in landmarks_data:
+                        landmarks_data[face_id] = []
+
                     face_metadata[face_id].append(data)
+                    landmarks_data[face_id].append(data_land)
+
                     
                 if config.BLUR_ENABLED:
                     start_blur_time = time.perf_counter()
@@ -292,17 +307,12 @@ def process_thread(config, detector, interpretor, input_details, output_details,
     st = time.perf_counter()
     for face_id, entries in face_metadata.items():
         aes_key = face_id_to_aes_key[face_id]
-        encrypted_entries = []
         best_entry = entries[0]
         best_land_score = best_entry.get("land_score", -1)
         # best_box_score = best_entry.get("box_score", -1)
         max_index = 0
         # why encrypt each entry when i can just encrypt every time this guys face shows up at once.
         for i, entry in enumerate(entries):
-            json_data = json.dumps(entry).encode('utf-8')
-            encrypted = encrypt_data_aes128(json_data, aes_key)
-            encrypted_entries.append(encrypted)
-            
             land_score = entry.get("land_score", -1)
             box_score = entry.get("box_score", -1)
 
@@ -313,11 +323,11 @@ def process_thread(config, detector, interpretor, input_details, output_details,
                 best_land_score = land_score
                 # best_box_score = box_score
                 max_index = i
-        to_be_embedded[face_id] = (entries[max_index].get("face_image", None), entries[max_index].get("landmarks", None))
+        to_be_embedded[face_id] = (entries[max_index].get("face_image", None), landmarks_data[face_id][max_index].get("landmarks", None))
+        data = msgpack.packb(entries)
+        encrypted = encrypt_data_aes128(data, aes_key)
 
-
-        encrypted_face_metadata[f"frame_{face_id}"] = encrypted_entries
-    
+        encrypted_face_metadata[f"frame_{face_id}"] = encrypted
     en = time.perf_counter()
     encryption_time = (en - st) * 1000
 
@@ -325,24 +335,27 @@ def process_thread(config, detector, interpretor, input_details, output_details,
     batch_tensor, face_id_order = utils.preprocess_face_images(to_be_embedded, config.EMBEDDING_MODEL)
     en = time.perf_counter()
     preprocessing_time_for_embedding = (en-st)*1000
+
+    embedding_time = 0
+    num_embeddings = 0
     
-    if config.EMBEDDING_MODEL == "edgeface_s_gamma_05":
+    if config.EMBEDDING_MODEL == "edgeface_s_gamma_05" and batch_tensor is not None:
         with torch.no_grad():
             st = time.perf_counter()
             embeddings = model(batch_tensor)  # shape: (12, emb_dim)
             en = time.perf_counter()
             embedding_time = (en - st) * 1000
             num_embeddings = len(face_id_order)
-    else:
+    elif batch_tensor is not None:
         st = time.perf_counter()
         embeddings = model.predict(batch_tensor)
         en = time.perf_counter()
         embedding_time = (en - st) * 1000
         num_embeddings = len(face_id_order)
     
-    if config.EMBEDDING_MODEL == "edgeface_s_gamma_05":
+    if config.EMBEDDING_MODEL == "edgeface_s_gamma_05" and batch_tensor is not None:
         face_embeddings = embeddings.numpy().tolist()  # Shape: (N, 512)
-    else:
+    elif batch_tensor is not None:
         face_embeddings = embeddings.tolist()
         
     # New dicts to store AES key + embedding
@@ -370,12 +383,19 @@ def process_thread(config, detector, interpretor, input_details, output_details,
     face_id_to_combined_key_embedding["video_identifier"] = video_identifier
 
     st = time.perf_counter()
-    with open("../output/face_keys.json", "w") as f:
-        json.dump(face_id_to_combined_key_embedding, f, indent=2)
+    
+    # Landmarks
+    with open("/mnt/usb/landmarks.msgpack", "wb") as f:
+        f.write(msgpack.packb(landmarks_data))
 
-    # Save encrypted metadata
-    with open("../output/video_metadata_encrypted.json", "w") as f:
-        json.dump(encrypted_face_metadata, f, indent=2)
+    # Face keys
+    with open("/mnt/usb/face_keys.msgpack", "wb") as f:
+        f.write(msgpack.packb(face_id_to_combined_key_embedding))
+
+    # Encrypted metadata
+    with open("/mnt/usb/video_metadata_encrypted.msgpack", "wb") as f:
+        f.write(zlib.compress(msgpack.packb(encrypted_face_metadata)))
+
     end = time.perf_counter()
     saving_time = (end - st) * 1000
 
@@ -424,19 +444,19 @@ class Config:
     # INPUT_VIDEO_PATH = "../input/test.mov"
     INPUT_VIDEO_PATH = 0
     OUTPUT_VIDEO_PATH = "../output/blurred.mp4"
-    SAVE_OUTPUT = True
-    APPLY_PROTOCOL = True
+    SAVE_OUTPUT = False
+    APPLY_PROTOCOL = protocol_enabled
     AUDIO = False
     DETECTOR_MODEL = "yunet" ## or "yunet"
     # EMBEDDING_MODEL = "ghost" # or "edgeface_s_gamma_05"
     EMBEDDING_MODEL = "edgeface_s_gamma_05"
     EMBEDDING_MODEL_PATH = "../src/models/edgeface_s_gamma_05.pt"
     # EMBEDDING_MODEL_PATH = "../src/models/GN_W0.5_S2_ArcFace_epoch16.h5"
-    FRAME_SKIP = 5
+    FRAME_SKIP = skip_value
     TRACKING_SKIP = 0
     BLUR_ENABLED = True
     ROTATION_DEGREES = 90
-    CAM_FRAMES = 300  # Number of frames to capture if using webcam
+    CAM_FRAMES = frame_count  # Number of frames to capture if using webcam
     
 
     LANDMARK_STALENESS_THRESHOLD = 15
@@ -502,10 +522,12 @@ if __name__ == "__main__":
             metrics = process_thread(config, detector, interpretor, input_details, output_details, model, public_key)
             results_container['process_metrics'] = metrics
 
-        t1 = threading.Thread(target=read_thread, args=(config, cap))
+        t1 = threading.Thread(target=read_thread, args=(config, picam2))
         t2 = threading.Thread(target=process_thread_wrapper, args=(config, detector, interpretor, input_details, output_details, model, public_key, results))
-        t3 = threading.Thread(target=write_thread, args=(config, out))
+        t3 = threading.Thread(target=write_thread, args=(config, None))
         
+        time.sleep(3)
+
         start_process_time = time.perf_counter()
         t1.start()
         t2.start()
@@ -515,12 +537,19 @@ if __name__ == "__main__":
         t2.join()
         t3.join()
         end_process_time = time.perf_counter()
-    
+   
+        time.sleep(3)
+ 
         total_process_time = (end_process_time - start_process_time)
         print(f"\n\nTotal Protocol processing time: {total_process_time:.2f} s")
-    
+        
+        results["total_time"] = total_process_time
+
+        with open(f"/mnt/usb/eval_logs/{run_name}.json", "w") as f:
+            json.dump(results, f, indent=4)
+
         # Access and print the detailed metrics
-        if 'process_metrics' in results:
+        if 'process_metrics' in results and results['process_metrics'] is not None:
             metrics = results['process_metrics']
             print("\n--- Detailed Processing Metrics (in ms) ---")
             for metric_name, (total_time, count) in metrics.items():
@@ -536,6 +565,3 @@ if __name__ == "__main__":
                     print("  No operations performed.")
                     print("-----------------------------------------")
         picam2.close()
-        if out:
-            out.release()
-        cv2.destroyAllWindows()

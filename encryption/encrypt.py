@@ -9,6 +9,7 @@ import numpy as np
 import sys
 import os
 import uuid
+import msgpack, zlib, json
 
 # Helper: compute center of box
 def box_center(box):
@@ -16,15 +17,15 @@ def box_center(box):
     return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 # Encryption utility functions
-def pad(data):
-    pad_len = 16 - (len(data) % 16)
-    return data + bytes([pad_len]) * pad_len
+def pad(data, block_size=16):
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
 
 def encrypt_data_aes128(data, key):
     cipher = AES.new(key, AES.MODE_ECB)
-    padded_data = pad(data)
+    padded_data = pad(data, AES.block_size)
     encrypted = cipher.encrypt(padded_data)
-    return base64.b64encode(encrypted).decode('utf-8')
+    return encrypted
 
 # Configuration knob for encryption rate
 ENCRYPTION_FRAME_INTERVAL = 1  # Encrypt every x frames
@@ -55,7 +56,7 @@ from src.backbones import get_model
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 class Config:
-    INPUT_VIDEO_PATH = "../input/test.mov"
+    INPUT_VIDEO_PATH = "../input/test11.mov"
     # INPUT_VIDEO_PATH = 0
     OUTPUT_VIDEO_PATH = "../output/blurred.mp4"
     SAVE_OUTPUT = True
@@ -137,6 +138,8 @@ if __name__ == "__main__":
         prev_frame = None
 
         face_metadata = {}  # sidecar dict to collect encrypted metadata
+        landmarks_data = {}
+
         face_tracks = {}  # face_id: {"box": (x1,y1,x2,y2), "aes_key": key}
         MAX_CENTER_DIST = 60 # Vary this
 
@@ -292,16 +295,20 @@ if __name__ == "__main__":
                         st_enc = time.perf_counter()
                         face_image_for_encryption = rgb_frame[y:y+h, x:x+w]
 
-                        _, buffer = cv2.imencode('.png', face_image_for_encryption)
+                        _, buffer = cv2.imencode('.jpg', face_image_for_encryption)
                         face_image_encoded = base64.b64encode(buffer).decode('utf-8')
                         data = {
                             "frame": frame_count,
-                            "landmarks": np.array(landmarks_adjusted).tolist(),
+                            # "landmarks": np.array(landmarks_adjusted).tolist(),
                             "face_image": face_image_encoded,
                             "box": [x, y, x+w, y+h],
                             "box_score": float(detected_face_scores[i]),
                             "land_score": float(score),
                             "face_id": face_id
+                        }
+                        data_land = {
+                            "frame": frame_count,
+                            "landmarks": np.array(landmarks_adjusted).tolist(),
                         }
                         # json_data = json.dumps(data).encode('utf-8')
                         # encrypted = encrypt_data_aes128(json_data, aes_key)
@@ -310,7 +317,11 @@ if __name__ == "__main__":
                         if face_id not in face_metadata:
                             face_metadata[face_id] = []
 
+                        if face_id not in landmarks_data:
+                            landmarks_data[face_id] = []
+
                         face_metadata[face_id].append(data)
+                        landmarks_data[face_id].append(data_land)
                         en_enc = time.perf_counter()
                         enc_times.append((en_enc - st_enc) * 1000)
                         
@@ -360,17 +371,12 @@ if __name__ == "__main__":
         st = time.perf_counter()
         for face_id, entries in face_metadata.items():
             aes_key = face_id_to_aes_key[face_id]
-            encrypted_entries = []
             best_entry = entries[0]
             best_land_score = best_entry.get("land_score", -1)
             best_box_score = best_entry.get("box_score", -1)
             max_index = 0
             # why encrypt each entry when i can just encrypt every time this guys face shows up at once.
             for i, entry in enumerate(entries):
-                json_data = json.dumps(entry).encode('utf-8')
-                encrypted = encrypt_data_aes128(json_data, aes_key)
-                encrypted_entries.append(encrypted)
-                
                 land_score = entry.get("land_score", -1)
                 box_score = entry.get("box_score", -1)
 
@@ -381,10 +387,12 @@ if __name__ == "__main__":
                     best_land_score = land_score
                     best_box_score = box_score
                     max_index = i
-            to_be_embedded[face_id] = (entries[max_index].get("face_image", None), entries[max_index].get("landmarks", None))
+            to_be_embedded[face_id] = (entries[max_index].get("face_image", None), landmarks_data[face_id][max_index].get("landmarks", None))
+            data = msgpack.packb(entries)
+            encrypted = encrypt_data_aes128(data, aes_key)
 
+            encrypted_face_metadata[f"frame_{face_id}"] = encrypted
 
-            encrypted_face_metadata[f"frame_{face_id}"] = encrypted_entries
         en = time.perf_counter()
         print(f"Encryption metadata processing took: {(en-st)*1000:.2f} ms")
         
@@ -438,12 +446,19 @@ if __name__ == "__main__":
 
         # Save if needed
         st = time.perf_counter()
-        with open("../output/face_keys.json", "w") as f:
-            json.dump(face_id_to_combined_key_embedding, f, indent=2)
 
-        # Save encrypted metadata
-        with open("../output/video_metadata_encrypted.json", "w") as f:
-            json.dump(encrypted_face_metadata, f, indent=2)
+        # Landmarks
+        with open("../output/landmarks.msgpack", "wb") as f:
+            f.write(zlib.compress(msgpack.packb(landmarks_data)))
+
+        # Face keys
+        with open("../output/face_keys.msgpack", "wb") as f:
+            f.write(zlib.compress(msgpack.packb(face_id_to_combined_key_embedding)))
+
+        # Encrypted metadata
+        with open("../output/video_metadata_encrypted.msgpack", "wb") as f:
+            f.write(zlib.compress(msgpack.packb(encrypted_face_metadata)))
+
         end = time.perf_counter()
         tme = (end - st) * 1000
         end_process_time = time.perf_counter()
